@@ -1,35 +1,100 @@
 pipeline {
   agent any
+  options { timestamps() }
+
+  environment {
+    NOTIFY = 's223788901@deakin.edu.au' 
+  }
 
   stages {
     stage('Checkout') {
       steps {
+        // Change branch/URL if needed
         git branch: 'main', url: 'https://github.com/sepehr-sam/8.2CDevSecOp.git'
       }
     }
 
     stage('Install Dependencies') {
       steps {
-        bat "npm install"
+        bat 'npm ci || npm install'
       }
     }
 
     stage('Run Tests') {
       steps {
-        bat "npm test || exit /b 0"  // Allows pipeline to continue despite test failures
+        script {
+          // Capture test output; mark stage failed but keep pipeline running
+          catchError(buildResult: 'SUCCESS', stageResult: 'FAILURE') {
+            bat 'npm test > test-log.txt 2>&1'
+          }
+        }
+      }
+      post {
+        always {
+          archiveArtifacts artifacts: 'test-log.txt', fingerprint: true
+        }
+        success {
+          emailext(
+            to: env.NOTIFY,
+            subject: "TESTS SUCCESS: ${env.JOB_NAME} #${env.BUILD_NUMBER}",
+            body: "Tests passed.\nBuild: ${env.BUILD_URL}",
+            attachmentsPattern: 'test-log.txt',
+            mimeType: 'text/plain'
+          )
+        }
+        failure {
+          emailext(
+            to: env.NOTIFY,
+            subject: "TESTS FAILURE: ${env.JOB_NAME} #${env.BUILD_NUMBER}",
+            body: "Tests failed.\nBuild: ${env.BUILD_URL}",
+            attachmentsPattern: 'test-log.txt',
+            mimeType: 'text/plain'
+          )
+        }
       }
     }
 
     stage('Generate Coverage Report') {
       steps {
-        // Ensure coverage report exists
-        bat "npm run coverage || exit /b 0"
+        // If no coverage script, keep going
+        bat 'npm run coverage || exit /b 0'
       }
     }
 
     stage('NPM Audit (Security Scan)') {
       steps {
-        bat "npm audit || exit /b 0" // This will show known CVEs in the output
+        script {
+          // Human-readable + JSON reports; mark stage failed if vulns
+          catchError(buildResult: 'SUCCESS', stageResult: 'FAILURE') {
+            bat """
+              npm audit > audit-log.txt 2>&1
+              npm audit --json > audit-results.json 2>&1
+            """
+          }
+        }
+      }
+      post {
+        always {
+          archiveArtifacts artifacts: 'audit-log.txt,audit-results.json', fingerprint: true
+        }
+        success {
+          emailext(
+            to: env.NOTIFY,
+            subject: "SECURITY SCAN CLEAN: ${env.JOB_NAME} #${env.BUILD_NUMBER}",
+            body: "npm audit reported no blocking issues.\nBuild: ${env.BUILD_URL}",
+            attachmentsPattern: 'audit-log.txt,audit-results.json',
+            mimeType: 'text/plain'
+          )
+        }
+        failure {
+          emailext(
+            to: env.NOTIFY,
+            subject: "SECURITY SCAN VULNS FOUND: ${env.JOB_NAME} #${env.BUILD_NUMBER}",
+            body: "npm audit found vulnerabilities.\nBuild: ${env.BUILD_URL}",
+            attachmentsPattern: 'audit-log.txt,audit-results.json',
+            mimeType: 'text/plain'
+          )
+        }
       }
     }
   }
